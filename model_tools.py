@@ -819,6 +819,11 @@ def _approval_observability(ids: _CallIds):
             pass
 
 
+@dataclass(frozen=True)
+class _ToolExecutionBlocked:
+    reason: str
+
+
 def _execute_tool(function_name: str, function_args: Dict[str, Any], original_args: Dict[str, Any], ids: _CallIds,
                   *, user_task: Optional[str], enabled_tools: Optional[List[str]], skip_tool_execution_middleware: bool) -> Any:
     """Run the registry handler (through tool-execution middleware unless skipped)
@@ -832,6 +837,15 @@ def _execute_tool(function_name: str, function_args: Dict[str, Any], original_ar
         dispatch_kwargs["user_task"] = user_task
 
     def _dispatch(next_args: Dict[str, Any]) -> Any:
+        from hermes_cli.plugins import ExecutionDecision, get_plugin_manager
+        manager = get_plugin_manager()
+        dispatch_interceptors = getattr(manager, "dispatch_tool_execution_interceptors", None)
+        decision = (dispatch_interceptors(function_name, next_args, **asdict(ids)) if dispatch_interceptors
+                    else ExecutionDecision.continue_())
+        if decision.action == "BLOCK":
+            return _ToolExecutionBlocked(decision.reason)
+        if decision.action == "HANDLED":
+            return decision.result
         from tools.connectors import dispatch_connector_call, is_connector_name
         if is_connector_name(function_name):
             return dispatch_connector_call(function_name, next_args, ids.tool_call_id)
@@ -955,6 +969,10 @@ def handle_function_call(
         result = _execute_tool(function_name, function_args, original_args, ids, user_task=user_task,
                                enabled_tools=enabled_tools, skip_tool_execution_middleware=skip_tool_execution_middleware)
         duration_ms = _elapsed_ms(start)
+        if isinstance(result, _ToolExecutionBlocked):
+            reason = result.reason
+            return _emit(tool_error(reason), duration_ms=duration_ms, status="blocked",
+                         error_type="plugin_block", error_message=reason)
         _emit(result, duration_ms=duration_ms)
         return _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
 

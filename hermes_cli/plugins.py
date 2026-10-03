@@ -211,6 +211,26 @@ _env_enabled = env_var_enabled  # imported by plugins/memory
 _UNSET = object()
 
 
+@dataclass(frozen=True)
+class ExecutionDecision:
+    """A final tool-execution interceptor's explicit decision."""
+    action: str
+    reason: Optional[str] = None
+    result: Optional[str] = None
+
+    @classmethod
+    def continue_(cls):
+        return cls("CONTINUE")
+
+    @classmethod
+    def block(cls, reason: str):
+        return cls("BLOCK", reason=reason)
+
+    @classmethod
+    def handled(cls, result: str):
+        return cls("HANDLED", result=result)
+
+
 @dataclass
 class LoadedPlugin:
     """Runtime state for a single loaded plugin."""
@@ -920,6 +940,15 @@ class PluginContext:
             "middleware", kind, callback, self._manager._middleware, VALID_MIDDLEWARE
         )
 
+    def register_tool_execution_interceptor(self, callback: Callable, *, tool_names: Set[str]) -> PluginRegistration:
+        if not callable(callback) or not tool_names or not all(isinstance(n, str) and n for n in tool_names):
+            raise ValueError("interceptor requires a callable and non-empty tool_names")
+        entry = (frozenset(tool_names), callback, self.manifest.name)
+        self._manager._tool_execution_interceptors.append(entry)
+        return self._track("tool_execution_interceptor", ",".join(sorted(tool_names)),
+                           lambda: self._manager._tool_execution_interceptors.remove(entry)
+                           if entry in self._manager._tool_execution_interceptors else None)
+
     def _track_callback(
         self, kind: str, key: str, callback: Callable, mapping: Dict[str, List[Callable]],
         valid: Set[str],
@@ -1182,6 +1211,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # Fallback hooks registered by a memory provider before general discovery.
         self._memory_hook_registrations: Dict[Tuple[str, str], List[PluginRegistration]] = {}
         self._middleware: Dict[str, List[Callable]] = {}
+        self._tool_execution_interceptors: List[tuple] = []
         self._plugin_tool_names: Set[str] = set()
         self._plugin_platform_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
@@ -1237,6 +1267,23 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # and contributed tool names (so `hermes plugins list` still attributes them).
         self._predeclared_modules: Dict[str, types.ModuleType] = {}
         self._predeclared_tools: Dict[str, List[str]] = {}
+
+    def dispatch_tool_execution_interceptors(self, tool_name, args, **identity):
+        matches = [entry for entry in self._tool_execution_interceptors if tool_name in entry[0]]
+        if not matches:
+            return ExecutionDecision.continue_()
+        if len(matches) != 1:
+            return ExecutionDecision.block("Multiple execution interceptors claim this tool")
+        _names, callback, _owner = matches[0]
+        try:
+            decision = callback(tool_name, args, **identity)
+        except Exception:
+            return ExecutionDecision.block("Tool execution interceptor failed")
+        valid = (isinstance(decision, ExecutionDecision) and
+                 ((decision.action == "CONTINUE" and decision.reason is None and decision.result is None) or
+                  (decision.action == "BLOCK" and isinstance(decision.reason, str) and bool(decision.reason) and decision.result is None) or
+                  (decision.action == "HANDLED" and isinstance(decision.result, str) and decision.reason is None)))
+        return decision if valid else ExecutionDecision.block("Malformed tool execution interceptor decision")
 
     @property
     def has_gateway_message_injector(self) -> bool:
