@@ -824,6 +824,11 @@ class _ToolExecutionBlocked:
     reason: str
 
 
+@dataclass(frozen=True)
+class _ToolExecutionHandled:
+    result: Any
+
+
 def _execute_tool(function_name: str, function_args: Dict[str, Any], original_args: Dict[str, Any], ids: _CallIds,
                   *, user_task: Optional[str], enabled_tools: Optional[List[str]], skip_tool_execution_middleware: bool) -> Any:
     """Run the registry handler (through tool-execution middleware unless skipped)
@@ -845,7 +850,7 @@ def _execute_tool(function_name: str, function_args: Dict[str, Any], original_ar
         if decision.action == "BLOCK":
             return _ToolExecutionBlocked(decision.reason)
         if decision.action == "HANDLED":
-            return decision.result
+            return _ToolExecutionHandled(decision.result)
         from tools.connectors import dispatch_connector_call, is_connector_name
         if is_connector_name(function_name):
             return dispatch_connector_call(function_name, next_args, ids.tool_call_id)
@@ -973,6 +978,8 @@ def handle_function_call(
             reason = result.reason
             return _emit(tool_error(reason), duration_ms=duration_ms, status="blocked",
                          error_type="plugin_block", error_message=reason)
+        if isinstance(result, _ToolExecutionHandled):
+            return _emit(result.result, duration_ms=duration_ms)
         _emit(result, duration_ms=duration_ms)
         return _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
 

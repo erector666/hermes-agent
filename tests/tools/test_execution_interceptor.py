@@ -108,11 +108,28 @@ def test_interceptor_block_preserves_denial_through_result_transform(monkeypatch
     assert not any(name == "transform_tool_result" for name, _ in observed)
 
 
-def test_handled_returns_supplied_result_without_native_dispatch(monkeypatch):
+def test_handled_result_is_observed_but_not_transformed(monkeypatch):
+    import hermes_cli.lifecycle as lifecycle
     from hermes_cli.plugins import ExecutionDecision
+
     model_tools, native = _prepare_call(monkeypatch, [lambda *a, **kw: ExecutionDecision.handled("adapter-result")])
-    assert model_tools.handle_function_call("read_file", {"path": "sample.txt"}) == "adapter-result"
+    observed = []
+    monkeypatch.setattr(lifecycle, "has_hook", lambda name: name in {"post_tool_call", "transform_tool_result"})
+
+    def invoke_hook(name, **kwargs):
+        observed.append((name, kwargs))
+        if name == "transform_tool_result":
+            return ["transformed-result"]
+        return []
+
+    monkeypatch.setattr(lifecycle, "invoke_hook", invoke_hook)
+    result = model_tools.handle_function_call("read_file", {"path": "sample.txt"})
+
+    assert result == "adapter-result"
     assert native == []
+    post = next(kwargs for name, kwargs in observed if name == "post_tool_call")
+    assert post["result"] == "adapter-result"
+    assert not any(name == "transform_tool_result" for name, _ in observed)
 
 
 def test_multiple_matching_interceptors_block_before_callbacks(monkeypatch):
